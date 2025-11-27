@@ -1,0 +1,129 @@
+-- parsing data
+
+DESCRIBE SELECT * FROM read_json_auto('C:/Users/user/Downloads/steam_2025_5k-dataset-games_20250831.json.gz',
+        maximum_object_size = 268435456);
+
+CREATE OR REPLACE TABLE unnested_games AS
+SELECT unnest(games) as game_data
+FROM read_json_auto(
+        'C:/Users/user/Downloads/steam_2025_5k-dataset-games_20250831.json.gz',
+        maximum_object_size = 268435456
+     );
+
+SELECT * FROM unnested_games LIMIT 5;
+
+CREATE OR REPLACE TABLE table_games AS
+SELECT
+    game_data.appid::INTEGER as steam_id,
+    game_data.name_from_applist as name,
+    game_data.app_details.data.type as type,
+    game_data.app_details.data.release_date.date as release_date,
+    game_data.app_details.data.is_free::BOOLEAN as is_free,
+    game_data.app_details.data.price_overview.final_formatted as price,
+    game_data.app_details.data.short_description as description,
+    game_data.app_details.data.developers as developers_list,
+    game_data.app_details.data.genres as genres_list,
+    game_data.app_details.data.ratings.steam_germany.rating as rating
+
+FROM unnested_games;
+
+SELECT * FROM table_games LIMIT 20;
+
+-- cleaning data
+
+CREATE OR REPLACE TABLE games_cleaned AS
+SELECT
+    steam_id,
+    name,
+    CASE
+        WHEN is_free = true THEN 0.0
+        WHEN price IS NULL THEN 0.0
+        ELSE CAST(regexp_extract(price, '\d+\.?\d*') AS DOUBLE)
+    END AS price_clean,
+    COALESCE(
+        try_strptime(release_date, '%b %d, %Y'),
+        try_strptime(release_date, '%Y')
+    ) AS release_date_clean,
+    CASE
+        WHEN release_date ILIKE '%announced%' OR release_date ILIKE '%soon%' THEN 'TBA'
+        ELSE 'Released'
+    END AS date_status,
+    COALESCE(rating, 'Unrated') AS age_rating,
+    developers_list,
+    COALESCE(genres_list, [{'id': '-1', 'description': 'Unknown'}]) AS genres_clean
+
+FROM table_games;
+
+SELECT * FROM games_cleaned LIMIT 20;
+
+-- 1 - What are the most popular genres?
+
+WITH expanded_genres AS (
+    SELECT unnest(genres_clean).description AS genre
+    FROM games_cleaned
+)
+SELECT
+    genre,
+    COUNT(*) AS game_count
+FROM expanded_genres
+GROUP BY genre
+ORDER BY game_count DESC
+LIMIT 10;
+
+-- 2 - How many games are free, and how many are paid?
+
+SELECT
+    CASE
+        WHEN price_clean = 0 THEN 'Free'
+        ELSE 'Paid'
+    END AS monetization_type,
+    COUNT(*) AS count,
+    ROUND(AVG(price_clean), 2) AS avg_price
+FROM games_cleaned
+GROUP BY monetization_type;
+
+-- 3 - What is the dynamics of game production in 2020-2026 (with not produced yet as well)
+
+SELECT
+    YEAR(release_date_clean) AS release_year,
+    COUNT(*) AS games_released,
+FROM games_cleaned,
+WHERE release_year IS NOT NULL
+    AND release_year BETWEEN 2020 AND 2026
+GROUP BY release_year
+ORDER BY release_year;
+
+-- What is the average price by age_ratings?
+
+SELECT
+    CASE
+        WHEN age_rating = '6' THEN '6+'
+        WHEN age_rating = '12' THEN '12+'
+        WHEN age_rating = '16' THEN '16+'
+        WHEN age_rating = '18' THEN '18+'
+        WHEN age_rating = '0' THEN '0+'
+        ELSE 'Unrated'
+    END AS age_category,
+    ROUND(AVG(price_clean), 2) AS avg_price,
+    COUNT(*) as games_count
+FROM games_cleaned
+GROUP BY age_category
+ORDER BY age_category;
+
+-- What are the most productive developers?
+
+WITH developers_unnested AS (
+    SELECT unnest(developers_list) AS developer
+    FROM games_cleaned
+)
+SELECT
+    developer,
+    COUNT(*) AS games_count
+FROM developers_unnested
+GROUP BY developer
+ORDER BY games_count DESC
+LIMIT 10;
+
+
+
+
